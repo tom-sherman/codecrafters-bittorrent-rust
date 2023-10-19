@@ -1,3 +1,5 @@
+use hashes::Hashes;
+use serde::{self, Deserialize};
 use std::env;
 
 fn interperet_value(value: serde_bencode::value::Value) -> serde_json::Value {
@@ -27,6 +29,92 @@ fn decode_bencoded_value(input: &str) -> serde_json::Value {
     interperet_value(serde_bencode::from_str(&input).unwrap())
 }
 
+#[derive(Debug)]
+struct Url(reqwest::Url);
+
+impl Url {
+    pub fn value(&self) -> &reqwest::Url {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Url {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let str = String::deserialize(deserializer)?;
+        Ok(Url(
+            reqwest::Url::parse(&str).map_err(serde::de::Error::custom)?
+        ))
+    }
+}
+
+// announce:
+// info:
+// A dictionary with keys:
+// length: size of the file in bytes, for single-file torrents
+// name: suggested name to save the file / directory as
+// piece length: number of bytes in each piece
+// pieces: concatenated SHA-1 hashes of each piece
+
+#[derive(Deserialize, Debug)]
+struct Torrent {
+    /// URL to a "tracker", which is a central server that keeps track of peers participating in the sharing of a torrent.
+    announce: Url,
+    info: Info,
+}
+
+#[derive(Deserialize, Debug)]
+struct Info {
+    /// size of the file in bytes, for single-file torrents
+    length: u64,
+    /// suggested name to save the file / directory as
+    name: String,
+    /// number of bytes in each piece
+    #[serde(rename = "piece length")]
+    piece_length: u64,
+    /// SHA-1 hashes of each piece
+    pieces: Hashes,
+}
+
+// Thanks to @jonhoo for this code
+mod hashes {
+    use serde::de::{self, Deserialize, Deserializer, Visitor};
+    use std::fmt;
+    #[derive(Debug, Clone)]
+    pub struct Hashes(pub Vec<[u8; 20]>);
+    struct HashesVisitor;
+    impl<'de> Visitor<'de> for HashesVisitor {
+        type Value = Hashes;
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a byte string whose length is a multiple of 20")
+        }
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if v.len() % 20 != 0 {
+                return Err(E::custom(format!("length is {}", v.len())));
+            }
+            // TODO: use array_chunks when stable
+            Ok(Hashes(
+                v.chunks_exact(20)
+                    .map(|slice_20| slice_20.try_into().expect("guaranteed to be length 20"))
+                    .collect(),
+            ))
+        }
+    }
+    impl<'de> Deserialize<'de> for Hashes {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_bytes(HashesVisitor)
+        }
+    }
+}
+
 // Usage: your_bittorrent.sh decode "<encoded_value>"
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -36,6 +124,14 @@ fn main() {
         let encoded_value = &args[2];
         let decoded_value = decode_bencoded_value(&encoded_value);
         println!("{}", decoded_value.to_string());
+    } else if command == "info" {
+        let torrent_file_name = &args[2];
+        // Read file as string
+        let torrent_file = std::fs::read(torrent_file_name).unwrap();
+        let torrent: Torrent = serde_bencode::from_bytes(&torrent_file).unwrap();
+
+        println!("Tracker URL: {}", torrent.announce.value());
+        println!("Length: {}", torrent.info.length);
     } else {
         println!("unknown command: {}", args[1])
     }
