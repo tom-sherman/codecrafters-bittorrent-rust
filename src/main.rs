@@ -1,5 +1,6 @@
 use hashes::Hashes;
-use serde::{self, Deserialize};
+use serde::{self, Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::env;
 
 fn interperet_value(value: serde_bencode::value::Value) -> serde_json::Value {
@@ -50,22 +51,33 @@ impl<'de> Deserialize<'de> for Url {
     }
 }
 
-// announce:
-// info:
-// A dictionary with keys:
-// length: size of the file in bytes, for single-file torrents
-// name: suggested name to save the file / directory as
-// piece length: number of bytes in each piece
-// pieces: concatenated SHA-1 hashes of each piece
+impl Serialize for Url {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.to_string().serialize(serializer)
+    }
+}
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct Torrent {
     /// URL to a "tracker", which is a central server that keeps track of peers participating in the sharing of a torrent.
     announce: Url,
     info: Info,
 }
 
-#[derive(Deserialize, Debug)]
+impl Torrent {
+    pub fn info_hash(&self) -> String {
+        let mut hasher = Sha1::new();
+        let encoded_info = serde_bencode::to_bytes(&self.info).unwrap();
+        hasher.update(encoded_info);
+        let info_hash = hasher.finalize();
+        hex::encode(&info_hash)
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
 struct Info {
     /// size of the file in bytes, for single-file torrents
     length: u64,
@@ -81,6 +93,7 @@ struct Info {
 // Thanks to @jonhoo for this code
 mod hashes {
     use serde::de::{self, Deserialize, Deserializer, Visitor};
+    use serde::ser::{Serialize, Serializer};
     use std::fmt;
     #[derive(Debug, Clone)]
     pub struct Hashes(pub Vec<[u8; 20]>);
@@ -113,6 +126,16 @@ mod hashes {
             deserializer.deserialize_bytes(HashesVisitor)
         }
     }
+
+    impl Serialize for Hashes {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let single_slice = self.0.concat();
+            serializer.serialize_bytes(&single_slice)
+        }
+    }
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
@@ -132,6 +155,7 @@ fn main() {
 
         println!("Tracker URL: {}", torrent.announce.value());
         println!("Length: {}", torrent.info.length);
+        println!("Info Hash: {}", torrent.info_hash());
     } else {
         println!("unknown command: {}", args[1])
     }
