@@ -1,7 +1,21 @@
+use clap::{command, Parser, Subcommand};
 use hashes::Hashes;
 use serde::{self, Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::env;
+use std::path::PathBuf;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Decode { value: String },
+    Info { torrent: PathBuf },
+}
 
 fn interperet_value(value: serde_bencode::value::Value) -> serde_json::Value {
     match value {
@@ -141,29 +155,27 @@ mod hashes {
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let command = &args[1];
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
 
-    if command == "decode" {
-        let encoded_value = &args[2];
-        let decoded_value = decode_bencoded_value(&encoded_value);
-        println!("{}", decoded_value.to_string());
-    } else if command == "info" {
-        let torrent_file_name = &args[2];
-        // Read file as string
-        let torrent_file = std::fs::read(torrent_file_name).unwrap();
-        let torrent: Torrent = serde_bencode::from_bytes(&torrent_file).unwrap();
-
-        println!("Tracker URL: {}", torrent.announce.value());
-        println!("Length: {}", torrent.info.length);
-        println!("Info Hash: {}", hex::encode(torrent.info_hash()));
-        println!("Piece Length: {}", torrent.info.piece_length);
-        println!("Piece Hashes:");
-        for hash in torrent.info.pieces.0 {
-            println!("{}", hex::encode(hash));
+    match args.command {
+        Command::Decode { value } => {
+            let decoded_value = decode_bencoded_value(&value);
+            println!("{}", decoded_value.to_string());
         }
-    } else {
-        println!("unknown command: {}", args[1])
+        Command::Info { torrent } => {
+            let torrent_file = std::fs::read(torrent)?;
+            let torrent: Torrent = serde_bencode::from_bytes(&torrent_file)?;
+            println!("Tracker URL: {}", torrent.announce.value());
+            println!("Length: {}", torrent.info.length);
+            println!("Info Hash: {}", hex::encode(torrent.info_hash()));
+            println!("Piece Length: {}", torrent.info.piece_length);
+            println!("Piece Hashes:");
+            for hash in torrent.info.pieces.0 {
+                println!("{}", hex::encode(hash));
+            }
+        }
     }
+
+    Ok(())
 }
