@@ -68,12 +68,11 @@ struct Torrent {
 }
 
 impl Torrent {
-    pub fn info_hash(&self) -> String {
+    pub fn info_hash(&self) -> hashes::Hash {
         let mut hasher = Sha1::new();
         let encoded_info = serde_bencode::to_bytes(&self.info).unwrap();
         hasher.update(encoded_info);
-        let info_hash = hasher.finalize();
-        hex::encode(&info_hash)
+        hasher.finalize().into()
     }
 }
 
@@ -95,8 +94,11 @@ mod hashes {
     use serde::de::{self, Deserialize, Deserializer, Visitor};
     use serde::ser::{Serialize, Serializer};
     use std::fmt;
+
+    pub type Hash = [u8; 20];
+
     #[derive(Debug, Clone)]
-    pub struct Hashes(pub Vec<[u8; 20]>);
+    pub struct Hashes(pub Vec<Hash>);
     struct HashesVisitor;
     impl<'de> Visitor<'de> for HashesVisitor {
         type Value = Hashes;
@@ -155,7 +157,12 @@ fn main() {
 
         println!("Tracker URL: {}", torrent.announce.value());
         println!("Length: {}", torrent.info.length);
-        println!("Info Hash: {}", torrent.info_hash());
+        println!("Info Hash: {}", hex::encode(torrent.info_hash()));
+        println!("Piece Length: {}", torrent.info.piece_length);
+        println!("Piece Hashes:");
+        for hash in torrent.info.pieces.0 {
+            println!("{}", hex::encode(hash));
+        }
     } else {
         println!("unknown command: {}", args[1])
     }
