@@ -1,5 +1,6 @@
 use clap::{command, Parser, Subcommand};
 use hashes::Hashes;
+use peers::Peers;
 use serde::{self, Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ struct Args {
 enum Command {
     Decode { value: String },
     Info { torrent: PathBuf },
+    Peers { torrent: PathBuf },
 }
 
 fn interperet_value(value: serde_bencode::value::Value) -> serde_json::Value {
@@ -103,6 +105,72 @@ struct Info {
     pieces: Hashes,
 }
 
+#[derive(Debug)]
+struct Client<'a> {
+    peer_id: String,
+    port: u16,
+    uploaded: u64,
+    downloaded: u64,
+    left: u64,
+    torrent: &'a Torrent,
+}
+
+impl<'a> Client<'a> {
+    pub fn new(torrent: &'a Torrent) -> Self {
+        Self {
+            // TODO: generate a random peer id
+            peer_id: "00112233445566778899".to_owned(),
+            left: torrent.info.length,
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            torrent: torrent,
+        }
+    }
+
+    pub async fn get_peers(&self) -> anyhow::Result<Peers> {
+        let client = reqwest::Client::new();
+
+        let mut request = client.get(self.torrent.announce.value().clone()).build()?;
+
+        let query = serde_urlencoded::to_string(&TrackerRequest {
+            compact: 1,
+            downloaded: self.downloaded as usize,
+            left: self.left as usize,
+            peer_id: self.peer_id.clone(),
+            port: self.port,
+            uploaded: self.uploaded as usize,
+        })?;
+
+        request.url_mut().set_query(Some(&format!(
+            "info_hash={}&{}",
+            urlencode(&self.torrent.info_hash()).as_str(),
+            query,
+        )));
+
+        let body = client.execute(request).await?.bytes().await?;
+
+        Ok(serde_bencode::from_bytes::<TrackerResponse>(body.as_ref())?.peers)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TrackerRequest {
+    peer_id: String,
+    port: u16,
+    uploaded: usize,
+    downloaded: usize,
+    left: usize,
+    compact: u8,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TrackerResponse {
+    #[serde(rename = "interval")]
+    _interval: u64,
+    peers: Peers,
+}
+
 // Thanks to @jonhoo for this code
 mod hashes {
     use serde::de::{self, Deserialize, Deserializer, Visitor};
@@ -154,8 +222,63 @@ mod hashes {
     }
 }
 
+mod peers {
+    use serde::de::{self, Deserialize, Deserializer, Visitor};
+    use std::fmt;
+
+    #[derive(Debug, Clone)]
+    pub struct Peer {
+        pub ip: String,
+        pub port: u16,
+    }
+
+    impl Peer {
+        pub fn to_string(&self) -> String {
+            format!("{}:{}", self.ip, self.port)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct Peers(pub Vec<Peer>);
+    struct PeersVisitor;
+    impl<'de> Visitor<'de> for PeersVisitor {
+        type Value = Peers;
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a byte string whose length is a multiple of 6")
+        }
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if v.len() % 6 != 0 {
+                return Err(E::custom(format!("length is {}", v.len())));
+            }
+            // TODO: use array_chunks when stable
+            Ok(Peers(
+                v.chunks_exact(6)
+                    .map(|slice_6| slice_6.try_into().expect("guaranteed to be length 6"))
+                    .map(|chunk: [u8; 6]| {
+                        let ip = format!("{}.{}.{}.{}", chunk[0], chunk[1], chunk[2], chunk[3]);
+                        let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+                        Peer { ip, port }
+                    })
+                    .collect(),
+            ))
+        }
+    }
+    impl<'de> Deserialize<'de> for Peers {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_bytes(PeersVisitor)
+        }
+    }
+}
+
 // Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
@@ -175,7 +298,25 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", hex::encode(hash));
             }
         }
+        Command::Peers { torrent } => {
+            let torrent_file = std::fs::read(torrent)?;
+            let torrent: Torrent = serde_bencode::from_bytes(&torrent_file)?;
+
+            let client = Client::new(&torrent);
+            for peer in client.get_peers().await?.0 {
+                println!("{}", peer.to_string());
+            }
+        }
     }
 
     Ok(())
+}
+
+fn urlencode(t: &[u8; 20]) -> String {
+    let mut encoded = String::with_capacity(3 * t.len());
+    for &byte in t {
+        encoded.push('%');
+        encoded.push_str(&hex::encode(&[byte]));
+    }
+    encoded
 }
